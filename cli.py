@@ -69,6 +69,16 @@ def main():
     parser.add_argument("--end", default=None, help="Fecha fin YYYY-MM-DD (UTC). Si se omite, hasta hoy.")
     parser.add_argument("--symbols", default=None, help="Lista de símbolos separados por coma (omite el auto-descubrimiento).")
     parser.add_argument("--output", default="./exports", help="Carpeta de salida para los CSV (default: ./exports)")
+    parser.add_argument(
+        "--csv-format",
+        default="internacional",
+        choices=["internacional", "europeo"],
+        help=(
+            "Formato numérico del CSV: 'internacional' = coma separa columnas, punto son decimales "
+            "(1234.56, default). 'europeo' = punto y coma separa columnas, coma son decimales (1234,56) "
+            "— usa este si Excel/Power BI están en español y no detectan los decimales."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -146,7 +156,7 @@ def main():
             trades.extend(get_trades_for_symbols(symbol_list, m, start_ms, end_ms, progress_cb=progress))
         print(f"  -> {len(trades)} operaciones encontradas en total.")
 
-    print(f"\nExportando CSVs a {args.output} ...")
+    print(f"\nExportando CSVs a {args.output} (formato: {args.csv_format}) ...")
     written = export_all(
         args.output,
         balances=balances,
@@ -155,6 +165,7 @@ def main():
         deposits=deposits,
         withdrawals=withdrawals,
         fiat=fiat,
+        csv_format=args.csv_format,
     )
     if not written:
         print("No se generó ningún archivo (sin datos o sin tipos seleccionados).")

@@ -74,6 +74,17 @@ currency_filter_input = st.sidebar.text_input(
 )
 currency_filter = [c.strip().upper() for c in currency_filter_input.split(",") if c.strip()]
 
+st.sidebar.subheader("Formato del CSV")
+csv_format_label = st.sidebar.radio(
+    "Separador de decimales",
+    ["Europeo: 1.234,56 (Excel/Power BI en español)", "Internacional: 1234.56 (punto decimal)"],
+    index=0,
+    help="Si Power BI o Excel no detectan los decimales del CSV, es casi seguro que están configurados "
+    "en español (esperan coma decimal y punto y coma como separador de columnas). Elige 'Europeo' aquí "
+    "para que el CSV ya salga en ese formato. Esto no afecta al PDF.",
+)
+csv_format = "europeo" if csv_format_label.startswith("Europeo") else "internacional"
+
 st.sidebar.markdown("---")
 run_button = st.sidebar.button("🔄 Cargar datos", type="primary", use_container_width=True)
 
@@ -107,7 +118,7 @@ st.caption("Consulta tus saldos e historial de operaciones vía la API de Binanc
 # Importamos los módulos del proyecto solo después de configurar la página
 # (por si las credenciales llegan vía la barra lateral en este mismo run).
 from config import ConfigError, require_credentials  # noqa: E402
-from export import to_dataframe  # noqa: E402
+from export import to_csv_bytes, to_dataframe  # noqa: E402
 from fetchers.balances import get_account_snapshot, get_all_current_balances  # noqa: E402
 from fetchers.trades import get_trades_for_symbols  # noqa: E402
 from fetchers.transfers import get_deposits, get_fiat_deposits_withdrawals, get_withdrawals  # noqa: E402
@@ -123,7 +134,7 @@ def _filters_description() -> str:
     return " | ".join(parts)
 
 
-def _download_buttons(df: pd.DataFrame, label: str, filename_base: str, pdf_title: str):
+def _download_buttons(df: pd.DataFrame, label: str, filename_base: str, pdf_title: str, filters_desc: str, key_prefix: str):
     if df is None or df.empty:
         st.info("Sin datos para este rango/selección.")
         return
@@ -132,25 +143,30 @@ def _download_buttons(df: pd.DataFrame, label: str, filename_base: str, pdf_titl
     with col_csv:
         st.download_button(
             label=f"⬇️ {label} (CSV)",
-            data=df.to_csv(index=False).encode("utf-8"),
+            data=to_csv_bytes(df, csv_format=csv_format),
             file_name=f"{filename_base}.csv",
             mime="text/csv",
             use_container_width=True,
+            key=f"{key_prefix}_csv",
         )
     with col_pdf:
-        pdf_bytes = dataframe_to_pdf_bytes(df, title=pdf_title, filters_desc=_filters_description())
+        pdf_bytes = dataframe_to_pdf_bytes(df, title=pdf_title, filters_desc=filters_desc)
         st.download_button(
             label=f"⬇️ {label} (PDF)",
             data=pdf_bytes,
             file_name=f"{filename_base}.pdf",
             mime="application/pdf",
             use_container_width=True,
+            key=f"{key_prefix}_pdf",
         )
 
 
 tab_balances, tab_history, tab_trades, tab_deposits, tab_withdrawals, tab_fiat, tab_stats = st.tabs(
     ["Saldos actuales", "Histórico de saldos", "Operaciones", "Depósitos", "Retiros", "Fiat", "📈 Estadísticas"]
 )
+
+if "loaded_data" not in st.session_state:
+    st.session_state["loaded_data"] = None
 
 if run_button:
     try:
@@ -257,18 +273,55 @@ if run_button:
         df_fiat = df_fiat[df_fiat["asset"].apply(_matches_currency)]
 
     # ------------------------------------------------------------------
-    # Fase 3: renderizar cada pestaña con los datos ya listos.
+    # Fase 3: guardar todo en session_state. Streamlit vuelve a ejecutar
+    # este script en cada interacción (incluidos los botones de descarga
+    # CSV/PDF), así que si no guardamos los datos aquí, cada descarga
+    # forzaría a "olvidar" lo cargado y a tener que pulsar "Cargar datos"
+    # de nuevo. Guardándolos, las descargas ya no vuelven a llamar a la
+    # API — solo se repite la consulta cuando pulsas "Cargar datos" (o
+    # cambias fechas/moneda/símbolos y vuelves a pulsarlo).
+    # ------------------------------------------------------------------
+    st.session_state["loaded_data"] = {
+        "df_bal": df_bal,
+        "df_hist": df_hist,
+        "df_trades": df_trades,
+        "df_dep": df_dep,
+        "df_wd": df_wd,
+        "df_fiat": df_fiat,
+        "symbol_list": symbol_list,
+        "market": market,
+        "filters_desc": _filters_description(),
+    }
+
+data = st.session_state["loaded_data"]
+
+if data:
+    df_bal = data["df_bal"]
+    df_hist = data["df_hist"]
+    df_trades = data["df_trades"]
+    df_dep = data["df_dep"]
+    df_wd = data["df_wd"]
+    df_fiat = data["df_fiat"]
+    symbol_list = data["symbol_list"]
+    loaded_market = data["market"]
+    filters_desc = data["filters_desc"]
+
+    st.caption(f"📅 Datos cargados con: {filters_desc} — mercado operaciones: {loaded_market}. Vuelve a pulsar **Cargar datos** para refrescar.")
+
+    # ------------------------------------------------------------------
+    # Fase 4: renderizar cada pestaña con los datos ya cargados (no
+    # dispara llamadas nuevas a la API; sobrevive a las descargas).
     # ------------------------------------------------------------------
     with tab_balances:
         st.subheader("Saldos actuales (Spot + Margin + Futuros)")
-        _download_buttons(df_bal, "Saldos actuales", "saldos_actuales", "Binance – Saldos actuales")
+        _download_buttons(df_bal, "Saldos actuales", "saldos_actuales", "Binance – Saldos actuales", filters_desc, "balances")
         if not df_bal.empty and "total" in df_bal.columns:
             st.bar_chart(df_bal.set_index("asset")["total"])
 
     with tab_history:
         st.subheader("Histórico diario de saldos")
         st.caption("Binance solo conserva snapshots diarios de los últimos ~30-90 días, según el tipo de cuenta.")
-        _download_buttons(df_hist, "Histórico de saldos", "balances_historicos", "Binance – Histórico de saldos")
+        _download_buttons(df_hist, "Histórico de saldos", "balances_historicos", "Binance – Histórico de saldos", filters_desc, "history")
         if not df_hist.empty and "date" in df_hist.columns and "total_btc_value" in df_hist.columns:
             chart_df = df_hist.drop_duplicates(subset=["date", "wallet"])[["date", "total_btc_value"]].dropna()
             if not chart_df.empty:
@@ -276,25 +329,25 @@ if run_button:
                 st.line_chart(chart_df.set_index("date"))
 
     with tab_trades:
-        st.subheader(f"Operaciones – {market}")
+        st.subheader(f"Operaciones – {loaded_market}")
         st.caption(f"Símbolos consultados: {', '.join(symbol_list) if symbol_list else '(ninguno detectado)'}")
-        _download_buttons(df_trades, "Operaciones", "operaciones", f"Binance – Operaciones ({market})")
+        _download_buttons(df_trades, "Operaciones", "operaciones", f"Binance – Operaciones ({loaded_market})", filters_desc, "trades")
 
     with tab_deposits:
         st.subheader("Depósitos")
-        _download_buttons(df_dep, "Depósitos", "depositos", "Binance – Depósitos")
+        _download_buttons(df_dep, "Depósitos", "depositos", "Binance – Depósitos", filters_desc, "deposits")
 
     with tab_withdrawals:
         st.subheader("Retiros")
-        _download_buttons(df_wd, "Retiros", "retiros", "Binance – Retiros")
+        _download_buttons(df_wd, "Retiros", "retiros", "Binance – Retiros", filters_desc, "withdrawals")
 
     with tab_fiat:
         st.subheader("Operaciones Fiat (compra/venta con tarjeta o transferencia)")
-        _download_buttons(df_fiat, "Fiat", "fiat", "Binance – Operaciones Fiat")
+        _download_buttons(df_fiat, "Fiat", "fiat", "Binance – Operaciones Fiat", filters_desc, "fiat")
 
     with tab_stats:
         st.subheader("📈 Estadísticas")
-        st.caption(f"Rango: {_filters_description()}")
+        st.caption(f"Rango: {filters_desc}")
 
         # --- KPIs ---------------------------------------------------
         k1, k2, k3, k4 = st.columns(4)

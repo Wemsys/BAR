@@ -14,7 +14,7 @@ os.environ["BINANCE_API_SECRET"] = "test_secret_abcdefgh"
 import pandas as pd  # noqa: E402
 
 from binance_api import _sign  # noqa: E402
-from export import export_all, to_dataframe  # noqa: E402
+from export import export_all, to_csv_bytes, to_dataframe  # noqa: E402
 import stats  # noqa: E402
 from symbols import discover_symbols  # noqa: E402
 
@@ -146,9 +146,30 @@ def test_stats_functions():
     print("OK: funciones de stats.py calculan agregados correctamente y toleran datasets vacíos")
 
 
+def test_csv_format_decimal_and_separator():
+    df = pd.DataFrame([{"asset": "BTC", "total": 1234.56}])
+
+    intl = to_csv_bytes(df, csv_format="internacional").decode("utf-8")
+    assert "1234.56" in intl
+    assert ";" not in intl.splitlines()[0]  # cabecera separada por comas
+
+    eur = to_csv_bytes(df, csv_format="europeo").decode("utf-8")
+    assert "1234,56" in eur
+    assert ";" in eur.splitlines()[0]  # cabecera separada por punto y coma
+
+    try:
+        to_csv_bytes(df, csv_format="invalido")
+        raise AssertionError("Se esperaba ValueError para un csv_format desconocido")
+    except ValueError:
+        pass
+
+    print("OK: to_csv_bytes produce formato internacional (1234.56) y europeo (1234,56;) correctamente")
+
+
 if __name__ == "__main__":
     test_sign_produces_valid_signature()
     test_export_to_csv()
     test_symbol_pattern_matches_exchangeinfo_shape()
     test_stats_functions()
+    test_csv_format_decimal_and_separator()
     print("\nTodas las pruebas offline pasaron correctamente.")

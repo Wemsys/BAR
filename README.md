@@ -86,6 +86,35 @@ Se abre en `http://localhost:8501`. Desde la barra lateral puedes:
   fechas y las monedas filtradas como encabezado; para históricos muy
   grandes (>2000 filas) el PDF se trunca con un aviso y conviene usar el
   CSV, que siempre trae el dato completo.
+- **Formato del CSV (para Excel/Power BI en español)**: en "Formato del
+  CSV" de la barra lateral eliges entre:
+  - **Europeo** (`1234,56` con `;` como separador de columnas) — es el
+    formato por defecto del dashboard, y el que esperan Excel y Power BI
+    configurados en español. Si al importar el CSV en Power BI ves los
+    decimales como texto o no los reconoce, es casi seguro que tu Power
+    BI/Windows están en español (usan coma como separador decimal) y el
+    CSV que descargaste estaba en formato internacional — cambia aquí a
+    "Europeo" y vuelve a descargar.
+  - **Internacional** (`1234.56` con `,` como separador de columnas) —
+    el formato "de fábrica" de pandas/Python, el que esperan la mayoría
+    de herramientas en inglés.
+  - El CLI (`cli.py`) tiene el mismo control con `--csv-format
+    internacional` o `--csv-format europeo` (por defecto: internacional).
+  - Esto solo afecta al CSV; el PDF no tiene separador decimal (es texto
+    formateado para leer, no para importar).
+  - Alternativa sin volver a descargar nada: en Power BI, "Transformar
+    datos" → clic derecho en la columna numérica → "Cambiar tipo" →
+    "Usando configuración regional..." → elige "Inglés (Estados Unidos)"
+    como origen. Así Power BI interpreta el punto como decimal aunque tu
+    Windows esté en español — útil si ya tienes el CSV en formato
+    internacional y no quieres volver a exportarlo.
+- **Descargar no vuelve a consultar la API**: los datos que trae "Cargar
+  datos" se guardan en la sesión del navegador (`st.session_state`), así
+  que puedes descargar el CSV/PDF de varias pestañas seguidas sin que se
+  repita la llamada a Binance ni se "olvide" lo cargado. Solo se vuelve a
+  consultar la API cuando pulsas **Cargar datos** de nuevo (por ejemplo,
+  tras cambiar el rango de fechas o el filtro de moneda) o cuando cierras
+  la pestaña del navegador / reinicias la app.
 - Pestaña **📈 Estadísticas**, con:
   - KPIs rápidos: nº de monedas con saldo, nº de depósitos, retiros y
     operaciones en el rango.
