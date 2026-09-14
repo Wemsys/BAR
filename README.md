@@ -77,7 +77,15 @@ Se abre en `http://localhost:8501`. Desde la barra lateral puedes:
 - Elegir el rango de fechas (Desde/Hasta).
 - Elegir el mercado (Spot/Margin/Futuros) para las operaciones.
 - Indicar símbolos manuales o dejar que se auto-descubran.
-- Ver tablas y gráficos, y descargar cada dataset como CSV.
+- **Filtrar por moneda**: escribe una o varias monedas separadas por coma
+  (ej. `BTC,ETH,USDT`) en "Filtrar por moneda" en la barra lateral. Se
+  aplica a saldos, histórico de saldos, operaciones (por símbolo base o
+  quote), depósitos, retiros y fiat. Vacío = sin filtro (todas).
+- Ver tablas y gráficos, y descargar cada dataset como **CSV o PDF** (un
+  botón junto al otro debajo de cada tabla). El PDF incluye el rango de
+  fechas y las monedas filtradas como encabezado; para históricos muy
+  grandes (>2000 filas) el PDF se trunca con un aviso y conviene usar el
+  CSV, que siempre trae el dato completo.
 
 ## 5. Desplegarlo
 
@@ -99,7 +107,38 @@ Se abre en `http://localhost:8501`. Desde la barra lateral puedes:
    privada en la configuración de la app) — al ser datos financieros
    personales, se recomienda mantenerla privada o protegida.
 
-### Opción B: Docker (tu propio servidor / VPS)
+### Opción B: Coolify (tu propio VPS con Coolify instalado)
+
+Coolify ya sabe construir imágenes a partir de un `Dockerfile`, así que no
+hace falta nada especial más allá de subir el repo:
+
+1. Sube el proyecto a GitHub/GitLab (igual que en la Opción A). Puede ser
+   un repo privado si conectas Coolify con una GitHub App o un deploy key.
+2. En Coolify: **+ New Resource → Application → Public/Private Repository**
+   y pega la URL del repo (elige la rama, por ejemplo `main`).
+3. Build Pack: Coolify detecta el `Dockerfile` automáticamente (déjalo en
+   "Dockerfile", no "Nixpacks").
+4. Puerto: define **8501** como puerto expuesto de la app (coincide con el
+   `EXPOSE 8501` del Dockerfile).
+5. Environment Variables: añade `BINANCE_API_KEY` y `BINANCE_API_SECRET`,
+   marcándolas como **secretas** (para que no aparezcan en logs/build). No
+   las marques como "Build Variable": deben estar disponibles solo en
+   runtime, que es como las lee el código (`os.environ`).
+6. Dominio: asigna el dominio/subdominio que te ofrezca Coolify o uno
+   propio; Coolify gestiona el certificado HTTPS automáticamente (Let's
+   Encrypt vía Traefik). Como Streamlit usa WebSockets para refrescar la
+   UI, necesitas que el dominio final sirva en HTTPS (Coolify lo hace por
+   defecto) para que el WebSocket funcione como `wss://`.
+7. Healthcheck: el `Dockerfile` ya incluye un `HEALTHCHECK` contra
+   `/_stcore/health` (el endpoint interno de salud de Streamlit), así que
+   Coolify debería detectar la app como "healthy" sin configuración extra.
+8. Deploy. Cada vez que hagas `git push` a la rama configurada, puedes
+   activar auto-deploy en Coolify para que redepliegue solo.
+9. Igual que en Streamlit Cloud: como son datos financieros tuyos, protege
+   el acceso (dominio no público / Basic Auth vía Coolify o Traefik / IP
+   allowlist) si el servidor es accesible desde Internet.
+
+### Opción C: Docker manual (cualquier VPS sin Coolify)
 
 ```bash
 docker build -t binance-export .
@@ -113,7 +152,7 @@ Abre `http://localhost:8501` (o la IP del servidor). Si lo expones a
 Internet, ponlo detrás de HTTPS + autenticación (por ejemplo con un
 reverse proxy como Caddy/Nginx + Basic Auth, o una VPN).
 
-### Opción C: Solo CLI en un cron/tarea programada
+### Opción D: Solo CLI en un cron/tarea programada
 
 Puedes programar `cli.py` con cron (Linux/Mac) o el Programador de tareas
 (Windows) para que te genere los CSV periódicamente, por ejemplo cada
@@ -150,6 +189,7 @@ binance_export/
 ├── config.py               # Carga de credenciales y configuración
 ├── symbols.py              # Auto-descubrimiento de símbolos
 ├── export.py               # Conversión a DataFrame y CSV
+├── pdf_export.py           # Generación de reportes PDF (dashboard)
 ├── fetchers/
 │   ├── balances.py         # Saldos actuales + histórico (snapshot)
 │   ├── trades.py           # Operaciones spot/margin/futuros

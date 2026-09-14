@@ -1,7 +1,8 @@
 """
 Dashboard Streamlit para explorar y exportar los datos de tu cuenta de
 Binance: saldos actuales, histórico de saldos, operaciones, depósitos y
-retiros, con filtro por rango de fechas y descarga en CSV.
+retiros, con filtro por rango de fechas y por moneda, y descarga en CSV
+o PDF.
 
 Ejecutar:
     streamlit run app.py
@@ -57,8 +58,32 @@ st.sidebar.subheader("Mercado para operaciones")
 market = st.sidebar.selectbox("Mercado", ["SPOT", "MARGIN", "FUTURES"], index=0)
 manual_symbols = st.sidebar.text_input("Símbolos manuales (opcional, coma-separado)", value="", help="Ej: BTCUSDT,ETHUSDT. Si se deja vacío, se auto-descubren.")
 
+st.sidebar.subheader("Filtrar por moneda")
+currency_filter_input = st.sidebar.text_input(
+    "Monedas (opcional, coma-separado)",
+    value="",
+    help="Ej: BTC,ETH,USDT. Se aplica a saldos, operaciones, depósitos, retiros y fiat. Deja vacío para ver todas.",
+)
+currency_filter = [c.strip().upper() for c in currency_filter_input.split(",") if c.strip()]
+
 st.sidebar.markdown("---")
 run_button = st.sidebar.button("🔄 Cargar datos", type="primary", use_container_width=True)
+
+
+def _matches_currency(asset: str) -> bool:
+    """True si `asset` (p.ej. 'BTC') pasa el filtro de moneda (o si no hay filtro)."""
+    if not currency_filter:
+        return True
+    return asset.upper() in currency_filter
+
+
+def _symbol_matches_currency(symbol: str) -> bool:
+    """True si `symbol` (p.ej. 'BTCUSDT') contiene alguna de las monedas
+    filtradas como base o como quote (o si no hay filtro)."""
+    if not currency_filter:
+        return True
+    symbol = symbol.upper()
+    return any(symbol.startswith(c) or symbol.endswith(c) for c in currency_filter)
 
 
 def to_ms(d: date, end_of_day: bool = False) -> int:
@@ -69,7 +94,7 @@ def to_ms(d: date, end_of_day: bool = False) -> int:
 
 
 st.title("📊 Binance – Saldos y Operaciones")
-st.caption("Consulta tus saldos e historial de operaciones vía la API de Binance, filtra por fechas y exporta a CSV.")
+st.caption("Consulta tus saldos e historial de operaciones vía la API de Binance, filtra por fechas y por moneda, y exporta a CSV o PDF.")
 
 # Importamos los módulos del proyecto solo después de configurar la página
 # (por si las credenciales llegan vía la barra lateral en este mismo run).
@@ -78,21 +103,40 @@ from export import to_dataframe  # noqa: E402
 from fetchers.balances import get_account_snapshot, get_all_current_balances  # noqa: E402
 from fetchers.trades import get_trades_for_symbols  # noqa: E402
 from fetchers.transfers import get_deposits, get_fiat_deposits_withdrawals, get_withdrawals  # noqa: E402
+from pdf_export import dataframe_to_pdf_bytes  # noqa: E402
 from symbols import discover_symbols  # noqa: E402
 
 
-def _download_button(df: pd.DataFrame, label: str, filename: str):
+def _filters_description() -> str:
+    parts = [f"{start_date.isoformat()} a {end_date.isoformat()} (UTC)"]
+    if currency_filter:
+        parts.append("monedas: " + ", ".join(currency_filter))
+    return " | ".join(parts)
+
+
+def _download_buttons(df: pd.DataFrame, label: str, filename_base: str, pdf_title: str):
     if df is None or df.empty:
         st.info("Sin datos para este rango/selección.")
         return
     st.dataframe(df, use_container_width=True)
-    st.download_button(
-        label=f"⬇️ Descargar {label} (CSV)",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=filename,
-        mime="text/csv",
-        use_container_width=True,
-    )
+    col_csv, col_pdf = st.columns(2)
+    with col_csv:
+        st.download_button(
+            label=f"⬇️ {label} (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{filename_base}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with col_pdf:
+        pdf_bytes = dataframe_to_pdf_bytes(df, title=pdf_title, filters_desc=_filters_description())
+        st.download_button(
+            label=f"⬇️ {label} (PDF)",
+            data=pdf_bytes,
+            file_name=f"{filename_base}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 
 tab_balances, tab_history, tab_trades, tab_deposits, tab_withdrawals, tab_fiat = st.tabs(
@@ -119,7 +163,9 @@ if run_button:
     with tab_balances:
         st.subheader("Saldos actuales (Spot + Margin + Futuros)")
         df_bal = pd.DataFrame(balances_rows)
-        _download_button(df_bal, "saldos_actuales", "saldos_actuales.csv")
+        if currency_filter and not df_bal.empty and "asset" in df_bal.columns:
+            df_bal = df_bal[df_bal["asset"].apply(_matches_currency)]
+        _download_buttons(df_bal, "Saldos actuales", "saldos_actuales", "Binance – Saldos actuales")
         if not df_bal.empty and "total" in df_bal.columns:
             st.bar_chart(df_bal.set_index("asset")["total"])
 
@@ -135,7 +181,9 @@ if run_button:
         st.subheader("Histórico diario de saldos")
         st.caption("Binance solo conserva snapshots diarios de los últimos ~30-90 días, según el tipo de cuenta.")
         df_hist = pd.DataFrame(history_rows)
-        _download_button(df_hist, "balances_historicos", "balances_historicos.csv")
+        if currency_filter and not df_hist.empty and "asset" in df_hist.columns:
+            df_hist = df_hist[df_hist["asset"].apply(_matches_currency)]
+        _download_buttons(df_hist, "Histórico de saldos", "balances_historicos", "Binance – Histórico de saldos")
         if not df_hist.empty and "date" in df_hist.columns and "total_btc_value" in df_hist.columns:
             chart_df = df_hist.drop_duplicates(subset=["date", "wallet"])[["date", "total_btc_value"]].dropna()
             if not chart_df.empty:
@@ -158,6 +206,8 @@ if run_button:
                     pass
                 discovery_market = "FUTURES" if market == "FUTURES" else "SPOT"
                 symbol_list = discover_symbols(assets, market=discovery_market)
+        if currency_filter:
+            symbol_list = [s for s in symbol_list if _symbol_matches_currency(s)]
         st.caption(f"Símbolos consultados: {', '.join(symbol_list) if symbol_list else '(ninguno detectado)'}")
 
         trades_rows = []
@@ -174,7 +224,9 @@ if run_button:
             progress_bar.empty()
 
         df_trades = to_dataframe(trades_rows, ts_col="timestamp")
-        _download_button(df_trades, "operaciones", "operaciones.csv")
+        if currency_filter and not df_trades.empty and "symbol" in df_trades.columns:
+            df_trades = df_trades[df_trades["symbol"].apply(_symbol_matches_currency)]
+        _download_buttons(df_trades, "Operaciones", "operaciones", f"Binance – Operaciones ({market})")
 
     with tab_deposits:
         st.subheader("Depósitos")
@@ -185,7 +237,9 @@ if run_button:
                 st.error(f"Error obteniendo depósitos: {e}")
                 deposits_rows = []
         df_dep = to_dataframe(deposits_rows, ts_col="timestamp")
-        _download_button(df_dep, "depositos", "depositos.csv")
+        if currency_filter and not df_dep.empty and "asset" in df_dep.columns:
+            df_dep = df_dep[df_dep["asset"].apply(_matches_currency)]
+        _download_buttons(df_dep, "Depósitos", "depositos", "Binance – Depósitos")
 
     with tab_withdrawals:
         st.subheader("Retiros")
@@ -196,7 +250,9 @@ if run_button:
                 st.error(f"Error obteniendo retiros: {e}")
                 withdrawals_rows = []
         df_wd = to_dataframe(withdrawals_rows, ts_col="timestamp")
-        _download_button(df_wd, "retiros", "retiros.csv")
+        if currency_filter and not df_wd.empty and "asset" in df_wd.columns:
+            df_wd = df_wd[df_wd["asset"].apply(_matches_currency)]
+        _download_buttons(df_wd, "Retiros", "retiros", "Binance – Retiros")
 
     with tab_fiat:
         st.subheader("Operaciones Fiat (compra/venta con tarjeta o transferencia)")
@@ -207,7 +263,9 @@ if run_button:
                 st.error(f"Error obteniendo operaciones fiat: {e}")
                 fiat_rows = []
         df_fiat = to_dataframe(fiat_rows, ts_col="timestamp")
-        _download_button(df_fiat, "fiat", "fiat.csv")
+        if currency_filter and not df_fiat.empty and "asset" in df_fiat.columns:
+            df_fiat = df_fiat[df_fiat["asset"].apply(_matches_currency)]
+        _download_buttons(df_fiat, "Fiat", "fiat", "Binance – Operaciones Fiat")
 
 else:
     st.info("Configura tus credenciales (si hace falta) y el rango de fechas en la barra lateral, luego pulsa **Cargar datos**.")
