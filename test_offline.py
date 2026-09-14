@@ -11,8 +11,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["BINANCE_API_KEY"] = "test_key_1234567890"
 os.environ["BINANCE_API_SECRET"] = "test_secret_abcdefgh"
 
+import pandas as pd  # noqa: E402
+
 from binance_api import _sign  # noqa: E402
 from export import export_all, to_dataframe  # noqa: E402
+import stats  # noqa: E402
 from symbols import discover_symbols  # noqa: E402
 
 
@@ -74,8 +77,78 @@ def test_symbol_pattern_matches_exchangeinfo_shape():
     print("OK: discover_symbols arma correctamente los pares válidos")
 
 
+def test_stats_functions():
+    df_bal = to_dataframe(
+        [
+            {"wallet": "SPOT", "asset": "BTC", "free": 0.5, "locked": 0.0, "total": 0.5},
+            {"wallet": "MARGIN", "asset": "BTC", "free": 0.1, "locked": 0.0, "total": 0.1},
+            {"wallet": "SPOT", "asset": "USDT", "free": 1200.0, "locked": 0.0, "total": 1200.0},
+        ],
+        ts_col=None,
+    )
+    bal_stats = stats.balances_by_asset(df_bal)
+    assert list(bal_stats["asset"]) == ["USDT", "BTC"]  # orden desc por total
+    assert abs(bal_stats.loc[bal_stats["asset"] == "BTC", "total"].iloc[0] - 0.6) < 1e-9
+
+    df_dep = to_dataframe(
+        [
+            {"type": "DEPOSIT", "asset": "BTC", "amount": 1.0, "timestamp": 1700000000000},
+            {"type": "DEPOSIT", "asset": "ETH", "amount": 2.0, "timestamp": 1702600000000},
+        ],
+        ts_col="timestamp",
+    )
+    df_wd = to_dataframe(
+        [{"type": "WITHDRAWAL", "asset": "BTC", "amount": 0.4, "timestamp": 1701000000000}],
+        ts_col="timestamp",
+    )
+    dep_wd = stats.deposits_vs_withdrawals_by_asset(df_dep, df_wd)
+    btc_row = dep_wd[dep_wd["asset"] == "BTC"].iloc[0]
+    assert abs(btc_row["depositado"] - 1.0) < 1e-9
+    assert abs(btc_row["retirado"] - 0.4) < 1e-9
+    assert abs(btc_row["neto"] - 0.6) < 1e-9
+    eth_row = dep_wd[dep_wd["asset"] == "ETH"].iloc[0]
+    assert eth_row["retirado"] == 0.0
+
+    long_df = stats.to_long_dep_wd(dep_wd)
+    assert set(long_df["tipo"].unique()) == {"Depósito", "Retiro"}
+
+    monthly = stats.monthly_transaction_counts(df_dep, df_wd)
+    assert not monthly.empty
+    assert set(monthly["tipo"].unique()) <= {"Depósito", "Retiro"}
+
+    df_trades = to_dataframe(
+        [
+            {"wallet": "SPOT", "symbol": "BTCUSDT", "trade_id": 1, "side": "BUY", "quote_qty": 350.0, "commission": 0.1, "commission_asset": "USDT", "timestamp": 1700000000000},
+            {"wallet": "SPOT", "symbol": "BTCUSDT", "trade_id": 2, "side": "SELL", "quote_qty": 400.0, "commission": 0.2, "commission_asset": "USDT", "timestamp": 1700100000000},
+            {"wallet": "SPOT", "symbol": "ETHUSDT", "trade_id": 3, "side": "BUY", "quote_qty": 100.0, "commission": 0.05, "commission_asset": "USDT", "timestamp": 1700200000000},
+        ],
+        ts_col="timestamp",
+    )
+    side_counts = stats.trade_side_counts(df_trades)
+    assert dict(zip(side_counts["side"], side_counts["count"])) == {"BUY": 2, "SELL": 1}
+
+    by_symbol = stats.trades_by_symbol(df_trades)
+    assert by_symbol.iloc[0]["symbol"] == "BTCUSDT"
+    assert by_symbol.iloc[0]["trades"] == 2
+
+    fees = stats.fees_by_asset(df_trades)
+    assert abs(fees.loc[fees["commission_asset"] == "USDT", "total_commission"].iloc[0] - 0.35) < 1e-9
+
+    # Casos vacíos no deben explotar
+    empty = pd.DataFrame()
+    assert stats.balances_by_asset(empty).empty
+    assert stats.deposits_vs_withdrawals_by_asset(empty, empty).empty
+    assert stats.monthly_transaction_counts(empty, empty).empty
+    assert stats.trade_side_counts(empty).empty
+    assert stats.trades_by_symbol(empty).empty
+    assert stats.fees_by_asset(empty).empty
+
+    print("OK: funciones de stats.py calculan agregados correctamente y toleran datasets vacíos")
+
+
 if __name__ == "__main__":
     test_sign_produces_valid_signature()
     test_export_to_csv()
     test_symbol_pattern_matches_exchangeinfo_shape()
+    test_stats_functions()
     print("\nTodas las pruebas offline pasaron correctamente.")

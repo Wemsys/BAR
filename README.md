@@ -86,6 +86,19 @@ Se abre en `http://localhost:8501`. Desde la barra lateral puedes:
   fechas y las monedas filtradas como encabezado; para históricos muy
   grandes (>2000 filas) el PDF se trunca con un aviso y conviene usar el
   CSV, que siempre trae el dato completo.
+- Pestaña **📈 Estadísticas**, con:
+  - KPIs rápidos: nº de monedas con saldo, nº de depósitos, retiros y
+    operaciones en el rango.
+  - Saldos por moneda (barras).
+  - Depósitos vs Retiros por moneda (barras agrupadas) + tabla de neto
+    (depositado − retirado) por moneda.
+  - Depósitos vs Retiros por mes: se compara el **número** de
+    movimientos (no el importe), para que sea comparable aunque mezcles
+    varias monedas con escalas muy distintas (ej. BTC y USDT).
+  - Operaciones: compra vs venta (nº), comisiones totales por moneda de
+    cobro, y operaciones por símbolo (top 15).
+  - Todos los gráficos respetan el rango de fechas y el filtro de moneda
+    de la barra lateral.
 
 ## 5. Desplegarlo
 
@@ -190,6 +203,7 @@ binance_export/
 ├── symbols.py              # Auto-descubrimiento de símbolos
 ├── export.py               # Conversión a DataFrame y CSV
 ├── pdf_export.py           # Generación de reportes PDF (dashboard)
+├── stats.py                 # Cálculos para la pestaña de Estadísticas
 ├── fetchers/
 │   ├── balances.py         # Saldos actuales + histórico (snapshot)
 │   ├── trades.py           # Operaciones spot/margin/futuros

@@ -1,8 +1,8 @@
 """
 Dashboard Streamlit para explorar y exportar los datos de tu cuenta de
-Binance: saldos actuales, histórico de saldos, operaciones, depósitos y
-retiros, con filtro por rango de fechas y por moneda, y descarga en CSV
-o PDF.
+Binance: saldos actuales, histórico de saldos, operaciones, depósitos,
+retiros y estadísticas, con filtro por rango de fechas y por moneda, y
+descarga en CSV o PDF.
 
 Ejecutar:
     streamlit run app.py
@@ -17,10 +17,18 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timedelta, timezone
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Binance – Saldos y Operaciones", page_icon="📊", layout="wide")
+
+# Paleta categórica validada (ver skill de dataviz): orden fijo, nunca
+# reciclado. Solo usamos los dos primeros slots (comparaciones de 2
+# categorías: Depósito/Retiro, Compra/Venta) y un tono único para barras
+# de una sola serie (magnitud por categoría, sin necesidad de leyenda).
+COLOR_SLOT_1 = "#2a78d6"  # azul
+COLOR_SLOT_2 = "#eb6834"  # naranja
 
 
 def _set_session_credentials(api_key: str, api_secret: str) -> None:
@@ -62,7 +70,7 @@ st.sidebar.subheader("Filtrar por moneda")
 currency_filter_input = st.sidebar.text_input(
     "Monedas (opcional, coma-separado)",
     value="",
-    help="Ej: BTC,ETH,USDT. Se aplica a saldos, operaciones, depósitos, retiros y fiat. Deja vacío para ver todas.",
+    help="Ej: BTC,ETH,USDT. Se aplica a saldos, operaciones, depósitos, retiros, fiat y estadísticas. Deja vacío para ver todas.",
 )
 currency_filter = [c.strip().upper() for c in currency_filter_input.split(",") if c.strip()]
 
@@ -104,6 +112,7 @@ from fetchers.balances import get_account_snapshot, get_all_current_balances  # 
 from fetchers.trades import get_trades_for_symbols  # noqa: E402
 from fetchers.transfers import get_deposits, get_fiat_deposits_withdrawals, get_withdrawals  # noqa: E402
 from pdf_export import dataframe_to_pdf_bytes  # noqa: E402
+import stats  # noqa: E402
 from symbols import discover_symbols  # noqa: E402
 
 
@@ -139,8 +148,8 @@ def _download_buttons(df: pd.DataFrame, label: str, filename_base: str, pdf_titl
         )
 
 
-tab_balances, tab_history, tab_trades, tab_deposits, tab_withdrawals, tab_fiat = st.tabs(
-    ["Saldos actuales", "Histórico de saldos", "Operaciones", "Depósitos", "Retiros", "Fiat"]
+tab_balances, tab_history, tab_trades, tab_deposits, tab_withdrawals, tab_fiat, tab_stats = st.tabs(
+    ["Saldos actuales", "Histórico de saldos", "Operaciones", "Depósitos", "Retiros", "Fiat", "📈 Estadísticas"]
 )
 
 if run_button:
@@ -153,21 +162,17 @@ if run_button:
     start_ms = to_ms(start_date)
     end_ms = to_ms(end_date, end_of_day=True)
 
+    # ------------------------------------------------------------------
+    # Fase 1: obtener TODOS los datos una sola vez (para no duplicar
+    # llamadas a la API entre pestañas y para poder cruzar datasets en
+    # "Estadísticas").
+    # ------------------------------------------------------------------
     with st.spinner("Consultando saldos actuales..."):
         try:
             balances_rows = get_all_current_balances()
         except Exception as e:
             st.error(f"Error obteniendo saldos: {e}")
             balances_rows = []
-
-    with tab_balances:
-        st.subheader("Saldos actuales (Spot + Margin + Futuros)")
-        df_bal = pd.DataFrame(balances_rows)
-        if currency_filter and not df_bal.empty and "asset" in df_bal.columns:
-            df_bal = df_bal[df_bal["asset"].apply(_matches_currency)]
-        _download_buttons(df_bal, "Saldos actuales", "saldos_actuales", "Binance – Saldos actuales")
-        if not df_bal.empty and "total" in df_bal.columns:
-            st.bar_chart(df_bal.set_index("asset")["total"])
 
     with st.spinner("Consultando histórico de saldos (accountSnapshot)..."):
         history_rows = []
@@ -177,12 +182,92 @@ if run_button:
             except Exception:
                 pass
 
+    with st.spinner("Consultando depósitos..."):
+        try:
+            deposits_rows = get_deposits(start_ms, end_ms)
+        except Exception as e:
+            st.error(f"Error obteniendo depósitos: {e}")
+            deposits_rows = []
+
+    with st.spinner("Consultando retiros..."):
+        try:
+            withdrawals_rows = get_withdrawals(start_ms, end_ms)
+        except Exception as e:
+            st.error(f"Error obteniendo retiros: {e}")
+            withdrawals_rows = []
+
+    with st.spinner("Consultando operaciones fiat..."):
+        try:
+            fiat_rows = get_fiat_deposits_withdrawals(start_ms, end_ms)
+        except Exception as e:
+            st.error(f"Error obteniendo operaciones fiat: {e}")
+            fiat_rows = []
+
+    if manual_symbols.strip():
+        symbol_list = [s.strip().upper() for s in manual_symbols.split(",") if s.strip()]
+    else:
+        with st.spinner("Auto-descubriendo símbolos..."):
+            assets = {b["asset"] for b in balances_rows}
+            assets |= {d["asset"] for d in deposits_rows}
+            assets |= {w["asset"] for w in withdrawals_rows}
+            discovery_market = "FUTURES" if market == "FUTURES" else "SPOT"
+            symbol_list = discover_symbols(assets, market=discovery_market)
+    if currency_filter:
+        symbol_list = [s for s in symbol_list if _symbol_matches_currency(s)]
+
+    trades_rows = []
+    if symbol_list:
+        progress_bar = st.progress(0.0, text="Consultando operaciones...")
+
+        def progress_cb(symbol, i, total):
+            progress_bar.progress(i / total, text=f"Consultando {symbol} ({i}/{total})")
+
+        try:
+            trades_rows = get_trades_for_symbols(symbol_list, market, start_ms, end_ms, progress_cb=progress_cb)
+        except Exception as e:
+            st.error(f"Error obteniendo operaciones: {e}")
+        progress_bar.empty()
+
+    # ------------------------------------------------------------------
+    # Fase 2: aplicar el filtro de moneda y construir los DataFrames que
+    # usan tanto las pestañas de datos como la de Estadísticas.
+    # ------------------------------------------------------------------
+    df_bal = pd.DataFrame(balances_rows)
+    if currency_filter and not df_bal.empty and "asset" in df_bal.columns:
+        df_bal = df_bal[df_bal["asset"].apply(_matches_currency)]
+
+    df_hist = pd.DataFrame(history_rows)
+    if currency_filter and not df_hist.empty and "asset" in df_hist.columns:
+        df_hist = df_hist[df_hist["asset"].apply(_matches_currency)]
+
+    df_trades = to_dataframe(trades_rows, ts_col="timestamp")
+    if currency_filter and not df_trades.empty and "symbol" in df_trades.columns:
+        df_trades = df_trades[df_trades["symbol"].apply(_symbol_matches_currency)]
+
+    df_dep = to_dataframe(deposits_rows, ts_col="timestamp")
+    if currency_filter and not df_dep.empty and "asset" in df_dep.columns:
+        df_dep = df_dep[df_dep["asset"].apply(_matches_currency)]
+
+    df_wd = to_dataframe(withdrawals_rows, ts_col="timestamp")
+    if currency_filter and not df_wd.empty and "asset" in df_wd.columns:
+        df_wd = df_wd[df_wd["asset"].apply(_matches_currency)]
+
+    df_fiat = to_dataframe(fiat_rows, ts_col="timestamp")
+    if currency_filter and not df_fiat.empty and "asset" in df_fiat.columns:
+        df_fiat = df_fiat[df_fiat["asset"].apply(_matches_currency)]
+
+    # ------------------------------------------------------------------
+    # Fase 3: renderizar cada pestaña con los datos ya listos.
+    # ------------------------------------------------------------------
+    with tab_balances:
+        st.subheader("Saldos actuales (Spot + Margin + Futuros)")
+        _download_buttons(df_bal, "Saldos actuales", "saldos_actuales", "Binance – Saldos actuales")
+        if not df_bal.empty and "total" in df_bal.columns:
+            st.bar_chart(df_bal.set_index("asset")["total"])
+
     with tab_history:
         st.subheader("Histórico diario de saldos")
         st.caption("Binance solo conserva snapshots diarios de los últimos ~30-90 días, según el tipo de cuenta.")
-        df_hist = pd.DataFrame(history_rows)
-        if currency_filter and not df_hist.empty and "asset" in df_hist.columns:
-            df_hist = df_hist[df_hist["asset"].apply(_matches_currency)]
         _download_buttons(df_hist, "Histórico de saldos", "balances_historicos", "Binance – Histórico de saldos")
         if not df_hist.empty and "date" in df_hist.columns and "total_btc_value" in df_hist.columns:
             chart_df = df_hist.drop_duplicates(subset=["date", "wallet"])[["date", "total_btc_value"]].dropna()
@@ -192,80 +277,185 @@ if run_button:
 
     with tab_trades:
         st.subheader(f"Operaciones – {market}")
-        if manual_symbols.strip():
-            symbol_list = [s.strip().upper() for s in manual_symbols.split(",") if s.strip()]
-        else:
-            with st.spinner("Auto-descubriendo símbolos..."):
-                assets = {b["asset"] for b in balances_rows}
-                try:
-                    for d in get_deposits(start_ms, end_ms):
-                        assets.add(d["asset"])
-                    for w in get_withdrawals(start_ms, end_ms):
-                        assets.add(w["asset"])
-                except Exception:
-                    pass
-                discovery_market = "FUTURES" if market == "FUTURES" else "SPOT"
-                symbol_list = discover_symbols(assets, market=discovery_market)
-        if currency_filter:
-            symbol_list = [s for s in symbol_list if _symbol_matches_currency(s)]
         st.caption(f"Símbolos consultados: {', '.join(symbol_list) if symbol_list else '(ninguno detectado)'}")
-
-        trades_rows = []
-        if symbol_list:
-            progress_bar = st.progress(0.0, text="Consultando operaciones...")
-
-            def progress_cb(symbol, i, total):
-                progress_bar.progress(i / total, text=f"Consultando {symbol} ({i}/{total})")
-
-            try:
-                trades_rows = get_trades_for_symbols(symbol_list, market, start_ms, end_ms, progress_cb=progress_cb)
-            except Exception as e:
-                st.error(f"Error obteniendo operaciones: {e}")
-            progress_bar.empty()
-
-        df_trades = to_dataframe(trades_rows, ts_col="timestamp")
-        if currency_filter and not df_trades.empty and "symbol" in df_trades.columns:
-            df_trades = df_trades[df_trades["symbol"].apply(_symbol_matches_currency)]
         _download_buttons(df_trades, "Operaciones", "operaciones", f"Binance – Operaciones ({market})")
 
     with tab_deposits:
         st.subheader("Depósitos")
-        with st.spinner("Consultando depósitos..."):
-            try:
-                deposits_rows = get_deposits(start_ms, end_ms)
-            except Exception as e:
-                st.error(f"Error obteniendo depósitos: {e}")
-                deposits_rows = []
-        df_dep = to_dataframe(deposits_rows, ts_col="timestamp")
-        if currency_filter and not df_dep.empty and "asset" in df_dep.columns:
-            df_dep = df_dep[df_dep["asset"].apply(_matches_currency)]
         _download_buttons(df_dep, "Depósitos", "depositos", "Binance – Depósitos")
 
     with tab_withdrawals:
         st.subheader("Retiros")
-        with st.spinner("Consultando retiros..."):
-            try:
-                withdrawals_rows = get_withdrawals(start_ms, end_ms)
-            except Exception as e:
-                st.error(f"Error obteniendo retiros: {e}")
-                withdrawals_rows = []
-        df_wd = to_dataframe(withdrawals_rows, ts_col="timestamp")
-        if currency_filter and not df_wd.empty and "asset" in df_wd.columns:
-            df_wd = df_wd[df_wd["asset"].apply(_matches_currency)]
         _download_buttons(df_wd, "Retiros", "retiros", "Binance – Retiros")
 
     with tab_fiat:
         st.subheader("Operaciones Fiat (compra/venta con tarjeta o transferencia)")
-        with st.spinner("Consultando operaciones fiat..."):
-            try:
-                fiat_rows = get_fiat_deposits_withdrawals(start_ms, end_ms)
-            except Exception as e:
-                st.error(f"Error obteniendo operaciones fiat: {e}")
-                fiat_rows = []
-        df_fiat = to_dataframe(fiat_rows, ts_col="timestamp")
-        if currency_filter and not df_fiat.empty and "asset" in df_fiat.columns:
-            df_fiat = df_fiat[df_fiat["asset"].apply(_matches_currency)]
         _download_buttons(df_fiat, "Fiat", "fiat", "Binance – Operaciones Fiat")
+
+    with tab_stats:
+        st.subheader("📈 Estadísticas")
+        st.caption(f"Rango: {_filters_description()}")
+
+        # --- KPIs ---------------------------------------------------
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Monedas con saldo", int(df_bal["asset"].nunique()) if not df_bal.empty else 0)
+        k2.metric("Depósitos (nº)", int(len(df_dep)))
+        k3.metric("Retiros (nº)", int(len(df_wd)))
+        k4.metric("Operaciones (nº)", int(len(df_trades)))
+
+        st.markdown("---")
+
+        # --- Saldos por moneda ---------------------------------------
+        st.markdown("#### Saldos por moneda")
+        bal_stats = stats.balances_by_asset(df_bal)
+        if bal_stats.empty:
+            st.info("Sin saldos para mostrar con el filtro actual.")
+        else:
+            chart = (
+                alt.Chart(bal_stats)
+                .mark_bar(color=COLOR_SLOT_1, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("asset:N", sort="-y", title="Moneda"),
+                    y=alt.Y("total:Q", title="Saldo total (unidades nativas)"),
+                    tooltip=[alt.Tooltip("asset:N", title="Moneda"), alt.Tooltip("total:Q", title="Saldo", format=",.8f")],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- Depósitos vs Retiros por moneda --------------------------
+        st.markdown("#### Depósitos vs Retiros por moneda")
+        dep_wd_wide = stats.deposits_vs_withdrawals_by_asset(df_dep, df_wd)
+        if dep_wd_wide.empty:
+            st.info("Sin depósitos ni retiros para mostrar con el filtro actual.")
+        else:
+            dep_wd_long = stats.to_long_dep_wd(dep_wd_wide)
+            chart = (
+                alt.Chart(dep_wd_long)
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("asset:N", title="Moneda"),
+                    xOffset=alt.XOffset("tipo:N", sort=["Depósito", "Retiro"]),
+                    y=alt.Y("amount:Q", title="Importe (unidades nativas)"),
+                    color=alt.Color(
+                        "tipo:N",
+                        sort=["Depósito", "Retiro"],
+                        scale=alt.Scale(domain=["Depósito", "Retiro"], range=[COLOR_SLOT_1, COLOR_SLOT_2]),
+                        legend=alt.Legend(title="Tipo"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("asset:N", title="Moneda"),
+                        alt.Tooltip("tipo:N", title="Tipo"),
+                        alt.Tooltip("amount:Q", title="Importe", format=",.8f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, use_container_width=True)
+            st.caption("Tabla de neto (depositado − retirado) por moneda:")
+            st.dataframe(dep_wd_wide, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- Depósitos vs Retiros en el tiempo (conteo mensual) -------
+        st.markdown("#### Depósitos vs Retiros por mes (nº de operaciones)")
+        st.caption("Se compara el número de movimientos, no el importe, para que sea comparable aunque mezcles varias monedas.")
+        monthly = stats.monthly_transaction_counts(df_dep, df_wd)
+        if monthly.empty:
+            st.info("Sin depósitos ni retiros para mostrar con el filtro actual.")
+        else:
+            chart = (
+                alt.Chart(monthly)
+                .mark_line(point=alt.OverlayMarkDef(size=80), strokeWidth=2)
+                .encode(
+                    x=alt.X("mes:N", title="Mes"),
+                    y=alt.Y("count:Q", title="Nº de operaciones"),
+                    color=alt.Color(
+                        "tipo:N",
+                        sort=["Depósito", "Retiro"],
+                        scale=alt.Scale(domain=["Depósito", "Retiro"], range=[COLOR_SLOT_1, COLOR_SLOT_2]),
+                        legend=alt.Legend(title="Tipo"),
+                    ),
+                    tooltip=[alt.Tooltip("mes:N", title="Mes"), alt.Tooltip("tipo:N", title="Tipo"), alt.Tooltip("count:Q", title="Nº operaciones")],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- Operaciones: compra vs venta, por símbolo, comisiones ----
+        st.markdown("#### Operaciones")
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            st.caption("Compra vs venta (nº de operaciones)")
+            side_counts = stats.trade_side_counts(df_trades)
+            if side_counts.empty:
+                st.info("Sin operaciones para mostrar con el filtro actual.")
+            else:
+                chart = (
+                    alt.Chart(side_counts)
+                    .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(
+                        x=alt.X("side:N", title="Lado", sort=["BUY", "SELL"]),
+                        y=alt.Y("count:Q", title="Nº de operaciones"),
+                        color=alt.Color(
+                            "side:N",
+                            sort=["BUY", "SELL"],
+                            scale=alt.Scale(domain=["BUY", "SELL"], range=[COLOR_SLOT_1, COLOR_SLOT_2]),
+                            legend=None,
+                        ),
+                        tooltip=[alt.Tooltip("side:N", title="Lado"), alt.Tooltip("count:Q", title="Nº operaciones")],
+                    )
+                    .properties(height=280)
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+        with col_b:
+            st.caption("Comisiones totales pagadas (por moneda de cobro)")
+            fees = stats.fees_by_asset(df_trades)
+            if fees.empty:
+                st.info("Sin comisiones para mostrar con el filtro actual.")
+            else:
+                chart = (
+                    alt.Chart(fees)
+                    .mark_bar(color=COLOR_SLOT_1, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(
+                        x=alt.X("commission_asset:N", sort="-y", title="Moneda"),
+                        y=alt.Y("total_commission:Q", title="Comisión total"),
+                        tooltip=[
+                            alt.Tooltip("commission_asset:N", title="Moneda"),
+                            alt.Tooltip("total_commission:Q", title="Comisión", format=",.8f"),
+                        ],
+                    )
+                    .properties(height=280)
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+        st.caption("Operaciones por símbolo (top 15 por nº de operaciones):")
+        by_symbol = stats.trades_by_symbol(df_trades)
+        if by_symbol.empty:
+            st.info("Sin operaciones para mostrar con el filtro actual.")
+        else:
+            chart = (
+                alt.Chart(by_symbol)
+                .mark_bar(color=COLOR_SLOT_1, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("symbol:N", sort="-y", title="Símbolo"),
+                    y=alt.Y("trades:Q", title="Nº de operaciones"),
+                    tooltip=[
+                        alt.Tooltip("symbol:N", title="Símbolo"),
+                        alt.Tooltip("trades:Q", title="Nº operaciones"),
+                        alt.Tooltip("quote_volume:Q", title="Volumen (quote)", format=",.2f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, use_container_width=True)
+            st.caption("El volumen (quote) está en la moneda de cotización propia de cada símbolo (p.ej. USDT en BTCUSDT) — no se suma entre símbolos con distinta moneda de cotización.")
 
 else:
     st.info("Configura tus credenciales (si hace falta) y el rango de fechas en la barra lateral, luego pulsa **Cargar datos**.")

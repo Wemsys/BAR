@@ -1,3 +1,4 @@
 0000000000000000000000000000000000000000 445553a60de35f463fa101520eabc6e73a9283f2 VIC <administracion@labmoon.eu> 1789199092 +0000	commit (initial): Sistema de exportación Binance: saldos, operaciones, CSV y dashboard Streamlit
 445553a60de35f463fa101520eabc6e73a9283f2 d8dc9ccc6d01136564c959d1fbfc12166fe77115 VIC <administracion@labmoon.eu> 1789199441 +0000	commit: Añadir guía de despliegue en Coolify y healthcheck de Streamlit
 d8dc9ccc6d01136564c959d1fbfc12166fe77115 193d5c14c6bcc15dea9367f47a05dc504216f361 VIC <administracion@labmoon.eu> 1789378597 +0000	commit: Añadir filtro por moneda y exportación a PDF en el dashboard
+193d5c14c6bcc15dea9367f47a05dc504216f361 5093ad02b54d8ebaf5e19f9a378a244d1ba25562 VIC <administracion@labmoon.eu> 1789380919 +0000	commit: Añadir pestaña de Estadísticas: saldos por moneda, depósitos vs retiros y métricas de operaciones
