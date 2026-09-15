@@ -37,6 +37,7 @@ def _patch_fetchers():
     transfers_mod.get_withdrawals = lambda *a, **k: []
     transfers_mod.get_fiat_deposits_withdrawals = lambda *a, **k: []
     symbols_mod.discover_symbols = lambda assets, market="SPOT": ["BTCUSDT"]
+    symbols_mod.get_symbol_info_map = lambda market="SPOT": {"BTCUSDT": ("BTC", "USDT")}
     trades_mod.get_trades_for_symbols = lambda *a, **k: [
         {
             "wallet": "SPOT",
@@ -46,13 +47,28 @@ def _patch_fetchers():
             "timestamp": 1700000000000,
             "side": "BUY",
             "price": 35000.0,
-            "qty": 0.01,
-            "quote_qty": 350.0,
-            "commission": 0.00001,
+            "qty": 0.02,
+            "quote_qty": 700.0,
+            "commission": 0.00002,
             "commission_asset": "BTC",
             "is_maker": True,
             "realized_pnl": None,
-        }
+        },
+        {
+            "wallet": "SPOT",
+            "symbol": "BTCUSDT",
+            "trade_id": 2,
+            "order_id": 101,
+            "timestamp": 1700100000000,
+            "side": "SELL",
+            "price": 36000.0,
+            "qty": 0.01,
+            "quote_qty": 360.0,
+            "commission": 0.36,
+            "commission_asset": "USDT",
+            "is_maker": False,
+            "realized_pnl": None,
+        },
     ]
 
 
@@ -75,6 +91,13 @@ def test_download_click_does_not_wipe_loaded_data():
     # Debe haber quedado algo en session_state.
     assert "loaded_data" in at.session_state and at.session_state["loaded_data"] is not None
     assert not at.session_state["loaded_data"]["df_bal"].empty
+
+    # El P&L FIFO (Spot) debe haberse calculado sin explotar: la venta de
+    # 0.01 BTC a 36000 (comisión 0.36 USDT) contra el lote comprado a
+    # 35000 (comisión 0.00002 BTC) debe dar un pnl positivo (~9.29 USDT).
+    fifo_df = at.session_state["loaded_data"]["fifo_df"]
+    assert not fifo_df.empty, "El cálculo de P&L FIFO no generó filas con el trade BUY+SELL simulado"
+    assert abs(float(fifo_df["pnl"].sum()) - 9.289649649649656) < 0.01
 
     # Simulamos el click en un botón de descarga CSV (el de saldos).
     download_buttons = [b for b in at.get("download_button") if b.key == "balances_csv"]

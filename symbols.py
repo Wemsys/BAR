@@ -22,26 +22,46 @@ dashboard.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Iterable, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 from binance_api import spot_public_get
 from config import COMMON_QUOTE_ASSETS
 
 
 @lru_cache(maxsize=1)
-def get_all_spot_symbols() -> Set[str]:
-    """Devuelve el conjunto de todos los símbolos spot existentes en Binance."""
+def get_spot_exchange_info() -> List[dict]:
+    """Lista cruda de símbolos spot desde /api/v3/exchangeInfo (incluye
+    baseAsset/quoteAsset de cada uno, útil para separar base/quote sin
+    tener que adivinarlo por texto)."""
     data = spot_public_get("/api/v3/exchangeInfo")
-    return {s["symbol"] for s in data.get("symbols", [])}
+    return data.get("symbols", [])
 
 
 @lru_cache(maxsize=1)
-def get_all_futures_symbols() -> Set[str]:
+def get_futures_exchange_info() -> List[dict]:
     from binance_api import _request  # import local para evitar ciclos
     from config import FUTURES_BASE_URL
 
     data = _request("GET", FUTURES_BASE_URL, "/fapi/v1/exchangeInfo", signed=False)
-    return {s["symbol"] for s in data.get("symbols", [])}
+    return data.get("symbols", [])
+
+
+def get_all_spot_symbols() -> Set[str]:
+    """Devuelve el conjunto de todos los símbolos spot existentes en Binance."""
+    return {s["symbol"] for s in get_spot_exchange_info()}
+
+
+def get_all_futures_symbols() -> Set[str]:
+    return {s["symbol"] for s in get_futures_exchange_info()}
+
+
+def get_symbol_info_map(market: str = "SPOT") -> Dict[str, Tuple[str, str]]:
+    """Devuelve {symbol: (baseAsset, quoteAsset)} usando la información
+    oficial de Binance (exchangeInfo) en vez de adivinar la separación
+    base/quote por texto. "SPOT" y "MARGIN" comparten el exchangeInfo de
+    spot (margin opera sobre los mismos pares); "FUTURES" usa el suyo."""
+    info_list = get_spot_exchange_info() if market in ("SPOT", "MARGIN") else get_futures_exchange_info()
+    return {s["symbol"]: (s.get("baseAsset"), s.get("quoteAsset")) for s in info_list}
 
 
 def discover_symbols(assets: Iterable[str], market: str = "SPOT") -> List[str]:

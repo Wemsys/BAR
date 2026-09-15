@@ -118,6 +118,31 @@ Se abre en `http://localhost:8501`. Desde la barra lateral puedes:
 - Pestaña **📈 Estadísticas**, con:
   - KPIs rápidos: nº de monedas con saldo, nº de depósitos, retiros y
     operaciones en el rango.
+  - **💰 Pérdidas y ganancias realizadas (P&L)**:
+    - **Spot/Margin**: se calcula con **FIFO** (First In, First Out) —
+      cada venta se empareja con las compras más antiguas todavía
+      disponibles de ese mismo símbolo, y la ganancia/pérdida es
+      (precio de venta − coste de compra) × cantidad. Para que el coste
+      sea correcto, el dashboard trae siempre el **histórico completo**
+      de cada símbolo hasta la fecha "Hasta" (ignora el "Desde" al
+      pedir los datos a Binance — solo lo usa para decidir qué ventas
+      cuentan en el resumen), así que la primera carga puede tardar más
+      si llevas mucho tiempo operando esos pares.
+    - **Futuros**: Binance ya calcula el PnL realizado de cada
+      operación, así que se suma directamente esa columna — no hace
+      falta FIFO.
+    - Limitaciones (con las que hay que tener cuidado): el FIFO es por
+      símbolo, así que si compras un activo contra una moneda de
+      cotización y lo vendes contra otra (ej. BTC con EUR y luego BTC
+      con USDT) no se puede cruzar el coste entre ambos; las comisiones
+      solo se descuentan cuando se cobran en el propio activo base o de
+      cotización (si pagas con BNB, esa comisión no se resta aquí); y
+      no incluye intereses de margin ni funding de futuros. Es una
+      referencia rápida, no un cálculo fiscal certificado — para tu
+      declaración de impuestos, contrástalo con una herramienta fiscal
+      especializada o con tu asesor.
+    - El detalle de ventas emparejadas por FIFO se puede descargar en
+      CSV/PDF igual que el resto de pestañas.
   - Saldos por moneda (barras).
   - Depósitos vs Retiros por moneda (barras agrupadas) + tabla de neto
     (depositado − retirado) por moneda.

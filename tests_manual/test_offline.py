@@ -68,13 +68,119 @@ def test_symbol_pattern_matches_exchangeinfo_shape():
     # candidatos usando un set simulado en vez de get_all_spot_symbols().
     import symbols as symbols_mod
 
-    symbols_mod.get_all_spot_symbols.cache_clear()
     symbols_mod.get_all_spot_symbols = lambda: {"BTCUSDT", "ETHUSDT", "ETHBTC"}
     result = discover_symbols(["BTC", "ETH"], market="SPOT")
     assert "BTCUSDT" in result
     assert "ETHUSDT" in result
     assert "ETHBTC" in result
     print("OK: discover_symbols arma correctamente los pares válidos")
+
+
+def test_fifo_realized_pnl_basic_two_lots():
+    # 2 compras a distinto precio + 1 venta que consume la primera compra
+    # entera y la mitad de la segunda. Sin comisiones, para verificar el
+    # emparejamiento FIFO puro.
+    trades = to_dataframe(
+        [
+            {"symbol": "BTCUSDT", "side": "BUY", "qty": 1.0, "price": 10000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 1000},
+            {"symbol": "BTCUSDT", "side": "BUY", "qty": 1.0, "price": 20000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 2000},
+            {"symbol": "BTCUSDT", "side": "SELL", "qty": 1.5, "price": 30000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 3000},
+        ],
+        ts_col="timestamp",
+    )
+    symbol_info = {"BTCUSDT": ("BTC", "USDT")}
+    fifo = stats.fifo_realized_pnl(trades, symbol_info)
+    assert len(fifo) == 2  # la venta consume 2 lotes -> 2 filas
+    assert abs(fifo["pnl"].sum() - 25000.0) < 1e-6  # 1*(30000-10000) + 0.5*(30000-20000)
+    assert fifo["pnl"].isna().sum() == 0
+
+    summary = stats.fifo_pnl_summary(fifo, only_in_range=False)
+    assert summary.iloc[0]["quote_asset"] == "USDT"
+    assert abs(summary.iloc[0]["pnl_realizado"] - 25000.0) < 1e-6
+    assert summary.iloc[0]["ventas_sin_costo_base"] == 0
+
+
+def test_fifo_realized_pnl_with_commissions():
+    # Comisión de compra en el activo base (BTC) y comisión de venta en
+    # el activo de cotización (USDT) - el caso normal en Binance sin BNB.
+    trades = to_dataframe(
+        [
+            {"symbol": "BTCUSDT", "side": "BUY", "qty": 1.0, "price": 10000.0, "commission": 0.001, "commission_asset": "BTC", "timestamp": 1000},
+            {"symbol": "BTCUSDT", "side": "SELL", "qty": 0.999, "price": 20000.0, "commission": 20.0, "commission_asset": "USDT", "timestamp": 2000},
+        ],
+        ts_col="timestamp",
+    )
+    symbol_info = {"BTCUSDT": ("BTC", "USDT")}
+    fifo = stats.fifo_realized_pnl(trades, symbol_info)
+    # Coste total pagado = 10000 USDT; ingreso neto = 0.999*20000 - 20 = 19960 USDT
+    # PnL esperado = 19960 - 10000 = 9960 USDT
+    assert abs(fifo["pnl"].sum() - 9960.0) < 1e-6
+
+
+def test_fifo_realized_pnl_sale_without_lot():
+    # Venta sin ninguna compra previa del mismo símbolo -> pnl None y se
+    # cuenta como "venta sin costo base".
+    trades = to_dataframe(
+        [{"symbol": "ETHUSDT", "side": "SELL", "qty": 2.0, "price": 2000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 1000}],
+        ts_col="timestamp",
+    )
+    symbol_info = {"ETHUSDT": ("ETH", "USDT")}
+    fifo = stats.fifo_realized_pnl(trades, symbol_info)
+    assert len(fifo) == 1
+    assert pd.isna(fifo.iloc[0]["pnl"])
+    summary = stats.fifo_pnl_summary(fifo, only_in_range=False)
+    assert summary.iloc[0]["ventas_sin_costo_base"] == 1
+
+    # Casos vacíos no deben explotar
+    assert stats.fifo_realized_pnl(pd.DataFrame(), {}).empty
+    assert stats.fifo_realized_pnl(trades, None).empty
+    assert stats.fifo_pnl_summary(pd.DataFrame()).empty
+    assert stats.fifo_pnl_by_symbol(pd.DataFrame()).empty
+    print("OK: fifo_realized_pnl empareja lotes FIFO, aplica comisiones y marca ventas sin coste base")
+
+
+def test_fifo_in_range_flag():
+    # La venta más antigua queda FUERA del rango elegido; el coste de su
+    # compra debe seguir usándose para las ventas posteriores, pero el
+    # resumen "en rango" no debe contarla.
+    trades = to_dataframe(
+        [
+            {"symbol": "BTCUSDT", "side": "BUY", "qty": 1.0, "price": 10000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 1000},
+            {"symbol": "BTCUSDT", "side": "SELL", "qty": 0.4, "price": 15000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 2000},  # fuera de rango
+            {"symbol": "BTCUSDT", "side": "SELL", "qty": 0.6, "price": 20000.0, "commission": 0.0, "commission_asset": "USDT", "timestamp": 5000},  # dentro de rango
+        ],
+        ts_col="timestamp",
+    )
+    symbol_info = {"BTCUSDT": ("BTC", "USDT")}
+    fifo = stats.fifo_realized_pnl(trades, symbol_info, start_ms=4000, end_ms=6000)
+    assert len(fifo) == 2
+    in_range_rows = fifo[fifo["in_range"]]
+    assert len(in_range_rows) == 1
+    assert abs(in_range_rows.iloc[0]["pnl"] - 0.6 * (20000 - 10000)) < 1e-6
+
+    summary_in_range = stats.fifo_pnl_summary(fifo, only_in_range=True)
+    assert abs(summary_in_range.iloc[0]["pnl_realizado"] - 6000.0) < 1e-6
+    summary_all_time = stats.fifo_pnl_summary(fifo, only_in_range=False)
+    assert abs(summary_all_time.iloc[0]["pnl_realizado"] - (2000 + 6000)) < 1e-6
+    print("OK: el flag in_range separa el P&L del rango elegido del histórico completo usado para el coste")
+
+
+def test_futures_realized_pnl_summary():
+    df_trades = to_dataframe(
+        [
+            {"symbol": "BTCUSDT", "realized_pnl": 100.5, "timestamp": 1000},
+            {"symbol": "BTCUSDT", "realized_pnl": -40.0, "timestamp": 2000},
+            {"symbol": "ETHUSDT", "realized_pnl": 15.0, "timestamp": 3000},
+        ],
+        ts_col="timestamp",
+    )
+    out = stats.futures_realized_pnl_summary(df_trades)
+    btc_row = out[out["symbol"] == "BTCUSDT"].iloc[0]
+    assert abs(btc_row["pnl_realizado"] - 60.5) < 1e-6
+    eth_row = out[out["symbol"] == "ETHUSDT"].iloc[0]
+    assert abs(eth_row["pnl_realizado"] - 15.0) < 1e-6
+    assert stats.futures_realized_pnl_summary(pd.DataFrame()).empty
+    print("OK: futures_realized_pnl_summary suma el realized_pnl que ya da Binance, agrupado por símbolo")
 
 
 def test_stats_functions():
@@ -170,6 +276,11 @@ if __name__ == "__main__":
     test_sign_produces_valid_signature()
     test_export_to_csv()
     test_symbol_pattern_matches_exchangeinfo_shape()
+    test_fifo_realized_pnl_basic_two_lots()
+    test_fifo_realized_pnl_with_commissions()
+    test_fifo_realized_pnl_sale_without_lot()
+    test_fifo_in_range_flag()
+    test_futures_realized_pnl_summary()
     test_stats_functions()
     test_csv_format_decimal_and_separator()
     print("\nTodas las pruebas offline pasaron correctamente.")

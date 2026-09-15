@@ -29,6 +29,11 @@ st.set_page_config(page_title="Binance – Saldos y Operaciones", page_icon="�
 # de una sola serie (magnitud por categoría, sin necesidad de leyenda).
 COLOR_SLOT_1 = "#2a78d6"  # azul
 COLOR_SLOT_2 = "#eb6834"  # naranja
+# Colores de estado (fijos, no se reciclan como categóricos): para
+# marcar polaridad ganancia/pérdida en el P&L, donde el signo del valor
+# ya es la propia leyenda (no hace falta una leyenda de color aparte).
+COLOR_GOOD = "#0ca30c"  # ganancia
+COLOR_CRITICAL = "#d03b3b"  # pérdida
 
 
 def _set_session_credentials(api_key: str, api_secret: str) -> None:
@@ -124,7 +129,7 @@ from fetchers.trades import get_trades_for_symbols  # noqa: E402
 from fetchers.transfers import get_deposits, get_fiat_deposits_withdrawals, get_withdrawals  # noqa: E402
 from pdf_export import dataframe_to_pdf_bytes  # noqa: E402
 import stats  # noqa: E402
-from symbols import discover_symbols  # noqa: E402
+from symbols import discover_symbols, get_symbol_info_map  # noqa: E402
 
 
 def _filters_description() -> str:
@@ -231,6 +236,17 @@ if run_button:
     if currency_filter:
         symbol_list = [s for s in symbol_list if _symbol_matches_currency(s)]
 
+    # Para Spot/Margin, el cálculo de P&L (FIFO, ver pestaña Estadísticas)
+    # necesita el histórico COMPLETO de cada símbolo para conocer el coste
+    # real de las compras más antiguas — no solo lo que cae dentro de
+    # "Desde". Por eso aquí se ignora "Desde" al pedir los datos a Binance
+    # (fetch_start_ms=None) y el filtro de fecha se aplica después, en el
+    # cliente, para lo que sí debe respetar el rango (pestaña Operaciones,
+    # exportaciones, y el resumen de P&L "en el rango"). En Futuros no
+    # hace falta: Binance ya da el PnL realizado por trade, así que ahí sí
+    # se pide directamente acotado a [start_ms, end_ms] (más rápido).
+    fetch_start_ms = None if market in ("SPOT", "MARGIN") else start_ms
+
     trades_rows = []
     if symbol_list:
         progress_bar = st.progress(0.0, text="Consultando operaciones...")
@@ -239,10 +255,17 @@ if run_button:
             progress_bar.progress(i / total, text=f"Consultando {symbol} ({i}/{total})")
 
         try:
-            trades_rows = get_trades_for_symbols(symbol_list, market, start_ms, end_ms, progress_cb=progress_cb)
+            trades_rows = get_trades_for_symbols(symbol_list, market, fetch_start_ms, end_ms, progress_cb=progress_cb)
         except Exception as e:
             st.error(f"Error obteniendo operaciones: {e}")
         progress_bar.empty()
+
+    symbol_info = {}
+    if symbol_list and market in ("SPOT", "MARGIN"):
+        try:
+            symbol_info = get_symbol_info_map(market)
+        except Exception:
+            symbol_info = {}
 
     # ------------------------------------------------------------------
     # Fase 2: aplicar el filtro de moneda y construir los DataFrames que
@@ -256,9 +279,18 @@ if run_button:
     if currency_filter and not df_hist.empty and "asset" in df_hist.columns:
         df_hist = df_hist[df_hist["asset"].apply(_matches_currency)]
 
-    df_trades = to_dataframe(trades_rows, ts_col="timestamp")
-    if currency_filter and not df_trades.empty and "symbol" in df_trades.columns:
-        df_trades = df_trades[df_trades["symbol"].apply(_symbol_matches_currency)]
+    # df_trades_all: histórico completo (para Spot/Margin) usado por el
+    # cálculo de P&L FIFO. df_trades: recortado también por "Desde", es
+    # el que ven la pestaña Operaciones, las exportaciones y el resto de
+    # estadísticas (para Futuros, fetch_start_ms ya era start_ms, así que
+    # aquí no cambia nada).
+    df_trades_all = to_dataframe(trades_rows, ts_col="timestamp")
+    if currency_filter and not df_trades_all.empty and "symbol" in df_trades_all.columns:
+        df_trades_all = df_trades_all[df_trades_all["symbol"].apply(_symbol_matches_currency)]
+
+    df_trades = df_trades_all
+    if not df_trades.empty and "timestamp" in df_trades.columns:
+        df_trades = df_trades[df_trades["timestamp"] >= start_ms]
 
     df_dep = to_dataframe(deposits_rows, ts_col="timestamp")
     if currency_filter and not df_dep.empty and "asset" in df_dep.columns:
@@ -271,6 +303,13 @@ if run_button:
     df_fiat = to_dataframe(fiat_rows, ts_col="timestamp")
     if currency_filter and not df_fiat.empty and "asset" in df_fiat.columns:
         df_fiat = df_fiat[df_fiat["asset"].apply(_matches_currency)]
+
+    # P&L realizado: FIFO para Spot/Margin (usando el histórico completo
+    # en df_trades_all), o el realized_pnl que ya da Binance para Futuros.
+    if market in ("SPOT", "MARGIN"):
+        fifo_df = stats.fifo_realized_pnl(df_trades_all, symbol_info, start_ms=start_ms, end_ms=end_ms)
+    else:
+        fifo_df = pd.DataFrame()
 
     # ------------------------------------------------------------------
     # Fase 3: guardar todo en session_state. Streamlit vuelve a ejecutar
@@ -288,6 +327,7 @@ if run_button:
         "df_dep": df_dep,
         "df_wd": df_wd,
         "df_fiat": df_fiat,
+        "fifo_df": fifo_df,
         "symbol_list": symbol_list,
         "market": market,
         "filters_desc": _filters_description(),
@@ -302,6 +342,7 @@ if data:
     df_dep = data["df_dep"]
     df_wd = data["df_wd"]
     df_fiat = data["df_fiat"]
+    fifo_df = data.get("fifo_df", pd.DataFrame())
     symbol_list = data["symbol_list"]
     loaded_market = data["market"]
     filters_desc = data["filters_desc"]
@@ -355,6 +396,100 @@ if data:
         k2.metric("Depósitos (nº)", int(len(df_dep)))
         k3.metric("Retiros (nº)", int(len(df_wd)))
         k4.metric("Operaciones (nº)", int(len(df_trades)))
+
+        st.markdown("---")
+
+        # --- Pérdidas y ganancias realizadas (P&L) --------------------
+        st.markdown("#### 💰 Pérdidas y ganancias realizadas (P&L)")
+
+        if loaded_market == "FUTURES":
+            st.caption(
+                "Futuros: Binance ya calcula el PnL realizado de cada operación (columna `realized_pnl` "
+                "de /fapi/v1/userTrades), así que aquí se suma directamente — no hace falta FIFO. No "
+                "incluye funding ni comisiones."
+            )
+            futures_pnl = stats.futures_realized_pnl_summary(df_trades)
+            if futures_pnl.empty:
+                st.info("Sin operaciones de futuros con P&L para mostrar con el filtro actual.")
+            else:
+                st.metric("P&L realizado total en el rango", f"{futures_pnl['pnl_realizado'].sum():,.2f}")
+                chart = (
+                    alt.Chart(futures_pnl)
+                    .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(
+                        x=alt.X("symbol:N", sort="-y", title="Símbolo"),
+                        y=alt.Y("pnl_realizado:Q", title="P&L realizado"),
+                        color=alt.condition(alt.datum.pnl_realizado >= 0, alt.value(COLOR_GOOD), alt.value(COLOR_CRITICAL)),
+                        tooltip=[
+                            alt.Tooltip("symbol:N", title="Símbolo"),
+                            alt.Tooltip("pnl_realizado:Q", title="P&L", format=",.2f"),
+                        ],
+                    )
+                    .properties(height=300)
+                )
+                st.altair_chart(chart, use_container_width=True)
+                st.dataframe(futures_pnl, use_container_width=True)
+
+        else:
+            st.caption(
+                "Spot/Margin: se calcula con FIFO (First In, First Out) por símbolo — cada venta se "
+                "empareja con las compras más antiguas todavía disponibles de ese mismo par. Para que el "
+                "coste sea correcto se usa siempre el histórico completo de cada símbolo (no solo el rango "
+                "de fechas elegido); el rango de fechas solo decide qué ventas cuentan en el resumen."
+            )
+            with st.expander("⚠️ Limitaciones a tener en cuenta"):
+                st.markdown(
+                    "- Si compras un activo contra una moneda de cotización y lo vendes contra otra "
+                    "(ej. compras BTC con EUR y luego vendes BTC/USDT), el sistema no puede cruzar el "
+                    "coste entre símbolos distintos — esa venta aparece como *\"sin coste base conocido\"*. "
+                    "Para que el cálculo sea fiable, opera cada activo siempre contra la misma moneda de "
+                    "cotización.\n"
+                    "- Las comisiones solo se descuentan del P&L cuando se cobran en el propio activo base "
+                    "(compras) o en el propio activo de cotización (ventas) — el caso normal en Binance sin "
+                    "BNB. Si pagas comisiones en otro activo (ej. BNB), no se restan aquí; se siguen viendo "
+                    "aparte en \"Comisiones totales pagadas\" más abajo.\n"
+                    "- No incluye intereses de margin (préstamos) ni funding de futuros.\n"
+                    "- Esto es una referencia rápida, no un cálculo fiscal certificado — para tu "
+                    "declaración de impuestos, contrástalo con una herramienta fiscal especializada o con "
+                    "tu asesor."
+                )
+
+            if fifo_df is None or fifo_df.empty:
+                st.info("Sin ventas con las que calcular P&L en Spot/Margin con el filtro actual.")
+            else:
+                summary_in_range = stats.fifo_pnl_summary(fifo_df, only_in_range=True)
+                if summary_in_range.empty:
+                    st.info("Ninguna venta cae dentro del rango de fechas elegido.")
+                else:
+                    cols = st.columns(len(summary_in_range))
+                    for col, (_, row) in zip(cols, summary_in_range.iterrows()):
+                        col.metric(f"P&L realizado ({row['quote_asset']})", f"{row['pnl_realizado']:,.2f}")
+                        if row["ventas_sin_costo_base"] > 0:
+                            col.caption(f"⚠️ {int(row['ventas_sin_costo_base'])} venta(s) sin coste base conocido")
+
+                by_symbol = stats.fifo_pnl_by_symbol(fifo_df, only_in_range=True)
+                if not by_symbol.empty:
+                    chart = (
+                        alt.Chart(by_symbol)
+                        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                        .encode(
+                            x=alt.X("symbol:N", sort="-y", title="Símbolo"),
+                            y=alt.Y("pnl_realizado:Q", title="P&L realizado"),
+                            color=alt.condition(alt.datum.pnl_realizado >= 0, alt.value(COLOR_GOOD), alt.value(COLOR_CRITICAL)),
+                            tooltip=[
+                                alt.Tooltip("symbol:N", title="Símbolo"),
+                                alt.Tooltip("quote_asset:N", title="Moneda"),
+                                alt.Tooltip("pnl_realizado:Q", title="P&L", format=",.2f"),
+                                alt.Tooltip("qty_vendida:Q", title="Cantidad vendida", format=",.8f"),
+                            ],
+                        )
+                        .properties(height=300)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+
+                st.caption("Detalle de ventas emparejadas por FIFO (dentro del rango elegido):")
+                detail = fifo_df[fifo_df["in_range"]].drop(columns=["in_range"]).sort_values("timestamp", ascending=False)
+                _download_buttons(detail, "P&L detalle", "pnl_fifo_detalle", "Binance – P&L FIFO (detalle)", filters_desc, "pnl_detail")
 
         st.markdown("---")
 
